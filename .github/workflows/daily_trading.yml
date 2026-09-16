@@ -1,0 +1,53 @@
+name: 🚀 King Trading Daily Quant Automation
+
+on:
+  schedule:
+    # 08:30 UTC = 15:30 Giờ Hà Nội (UTC+7), từ Thứ 2 đến Thứ 6 hàng tuần
+    - cron: '30 8 * * 1-5'
+  workflow_dispatch: # Cho phép bấm nút chạy thủ công bất cứ lúc nào
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  run-quant-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python Environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 📦 Install Required Quant Libraries
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy scikit-learn requests plotly
+
+      - name: 🧠 Execute Master Quant Engine & Triple-Gate Sentinel
+        run: |
+          python daily_pipeline.py
+
+      - name: 🚀 Stream Deploy index.html to GitHub Pages
+        run: |
+          git config --global user.name "KingTradingOS-Bot"
+          git config --global user.email "bot@kingtrading.esg"
+          git config --global http.postBuffer 104857600
+          
+          if [ -f index.html ]; then
+            git add index.html
+            if git diff --staged --quiet; then
+              echo "🔒 No changes detected. Web App is already up to date."
+            else
+              git commit -m "🚀 [AUTO-SESSION] Market Synchronized at $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+              git push origin main
+              echo "✅ Successfully deployed new session to GitHub Pages!"
+            fi
+          fi
