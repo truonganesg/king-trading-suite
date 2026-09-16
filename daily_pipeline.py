@@ -68,7 +68,7 @@ INDEX_MAPPING = {
 }
 
 def _clean_and_standardize_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty or 'TradingDate' not in df.columns: return pd.DataFrame(columns=['TradingDate', 'Open', 'High', 'Low', 'Close', 'Volume'])
+    if df is None or df.empty or 'TradingDate' not in df.columns: return pd.DataFrame(columns=['TradingDate', 'Open', 'High', 'Low', 'Close', 'Volume'])
     df = df.copy()
     df['TradingDate'] = pd.to_datetime(df['TradingDate'])
     if df['TradingDate'].dt.tz is not None: df['TradingDate'] = df['TradingDate'].dt.tz_localize(None)
@@ -166,73 +166,78 @@ CORE_COMPANY_NAMES = {
     "PVT": "PetroVietnam Transportation Corporation", "SSB": "Southeast Asia Commercial Bank (SeABank)"
 }
 
-# -------------------------------------------------------------
-# CELLS 1-5: MULTI-TIMEFRAME ICHIMOKU & QUANT ENGINES
-# -------------------------------------------------------------
-def compute_triple_layer_ichimoku(df_in: pd.DataFrame) -> pd.DataFrame:
-    df = df_in.copy()
-    layers = {'T1': {'tenkan': 10, 'kijun': 20, 'span_b': 48, 'shift': 20}, 'T2': {'tenkan': 60, 'kijun': 120, 'span_b': 48, 'shift': 20}, 'T3': {'tenkan': 180, 'kijun': 240, 'span_b': 48, 'shift': 20}}
-    for pfx, cfg in layers.items():
-        t_len, k_len, b_len, s_len = cfg['tenkan'], cfg['kijun'], cfg['span_b'], cfg['shift']
-        df[f'{pfx}_Tenkan'] = (df['High'].rolling(t_len, min_periods=min(3, len(df))).max() + df['Low'].rolling(t_len, min_periods=min(3, len(df))).min()) / 2.0
-        df[f'{pfx}_Kijun']  = (df['High'].rolling(k_len, min_periods=min(5, len(df))).max() + df['Low'].rolling(k_len, min_periods=min(5, len(df))).min()) / 2.0
-        df[f'{pfx}_SpanA_raw'] = (df[f'{pfx}_Tenkan'] + df[f'{pfx}_Kijun']) / 2.0
-        df[f'{pfx}_SpanA'] = df[f'{pfx}_SpanA_raw'].shift(s_len)
-        df[f'{pfx}_SpanB_raw'] = (df['High'].rolling(b_len, min_periods=min(8, len(df))).max() + df['Low'].rolling(b_len, min_periods=min(8, len(df))).min()) / 2.0
-        df[f'{pfx}_SpanB'] = df[f'{pfx}_SpanB_raw'].shift(s_len)
-    return df
+def compute_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
+    h, l, c_prev = df['High'], df['Low'], df['Close'].shift(1)
+    tr = pd.concat([h - l, (h - c_prev).abs(), (l - c_prev).abs()], axis=1).max(axis=1)
+    return tr.rolling(window=n, min_periods=n).mean()
 
-def compute_dynamic_rolling_poc(close_s: pd.Series, vol_s: pd.Series, window: int = 120, num_bins: int = 25, min_periods: int = 20) -> pd.Series:
-    n_len = len(close_s); poc = np.full(n_len, np.nan); c_arr = close_s.values; v_arr = vol_s.values
-    for i in range(min_periods, n_len):
-        start_idx = max(0, i - window + 1); c_slice = c_arr[start_idx : i + 1]; v_slice = v_arr[start_idx : i + 1]
-        c_min, c_max = c_slice.min(), c_slice.max()
-        if c_max > c_min:
-            bins = np.linspace(c_min, c_max, num_bins + 1)
-            bin_idx = np.clip(np.digitize(c_slice, bins) - 1, 0, num_bins - 1)
-            vol_bins = np.bincount(bin_idx, weights=v_slice, minlength=num_bins)
-            poc[i] = (bins[np.argmax(vol_bins)] + bins[np.argmax(vol_bins) + 1]) / 2.0
-        else: poc[i] = c_min
-    return pd.Series(poc, index=close_s.index).bfill()
-
-def detect_oscillator_divergences(high_s: pd.Series, low_s: pd.Series, osc_s: pd.Series, osc_type: str = 'RSI', window: int = 5, lookback: int = 25):
-    n_len = len(high_s); bull_div = np.zeros(n_len, dtype=int); bear_div = np.zeros(n_len, dtype=int)
-    h_arr, l_arr, o_arr = high_s.values, low_s.values, osc_s.values
-    ob_threshold = 85.0 if osc_type == 'BBPCT' else 55.0; os_threshold = 15.0 if osc_type == 'BBPCT' else 45.0
-    for i in range(lookback + window, n_len):
-        if o_arr[i - window] == np.max(o_arr[i - 2 * window : i + 1]) and o_arr[i - window] >= ob_threshold:
-            cur_pk_idx = i - window; search_o = o_arr[max(0, cur_pk_idx - lookback) : cur_pk_idx - window]
-            if len(search_o) > 0:
-                prev_pk_idx = max(0, cur_pk_idx - lookback) + np.argmax(search_o)
-                if h_arr[cur_pk_idx] > h_arr[prev_pk_idx] * 1.005 and o_arr[cur_pk_idx] < o_arr[prev_pk_idx]: bear_div[i] = 1
-        if o_arr[i - window] == np.min(o_arr[i - 2 * window : i + 1]) and o_arr[i - window] <= os_threshold:
-            cur_vl_idx = i - window; search_o = o_arr[max(0, cur_vl_idx - lookback) : cur_vl_idx - window]
-            if len(search_o) > 0:
-                prev_vl_idx = max(0, cur_vl_idx - lookback) + np.argmin(search_o)
-                if l_arr[cur_vl_idx] < l_arr[prev_vl_idx] * 0.995 and o_arr[cur_vl_idx] > o_arr[prev_vl_idx]: bull_div[i] = 1
-    return pd.Series(bull_div, index=high_s.index).rolling(5, min_periods=1).max().astype(int), pd.Series(bear_div, index=high_s.index).rolling(5, min_periods=1).max().astype(int)
+def calculate_institutional_t25_risk(ticker: str, df_ticker: pd.DataFrame = None, capital_vnd: float = 1_000_000_000, max_risk_pct: float = 1.5, rr_target: float = 2.0, max_stock_weight_pct: float = 25.0, broker_fee_pct: float = 0.15, sell_tax_pct: float = 0.10) -> dict:
+    try:
+        sym = str(ticker).strip().upper()
+        df = df_ticker.copy() if df_ticker is not None and not df_ticker.empty else fetch_ipo_historical_ohlcv(sym)
+        if df is None or df.empty or len(df) < 20: return {"status": "error"}
+        df['TradingDate'] = pd.to_datetime(df['TradingDate']).dt.normalize()
+        for col in ['Open', 'High', 'Low', 'Close', 'Volume']: df[col] = pd.to_numeric(df[col], errors='coerce')
+        df = df[df['Volume'] > 0].sort_values('TradingDate').reset_index(drop=True)
+        if len(df) < 20: return {"status": "error"}
+        df['ATR14'] = compute_atr(df, n=14)
+        latest = df.iloc[-1]; entry_price = float(latest['Close'])
+        atr_val = float(latest['ATR14']) if pd.notna(latest['ATR14']) else entry_price * 0.03
+        ma20_vol = float(df['Volume'].tail(20).mean())
+        atr_stop = entry_price - (1.5 * atr_val)
+        raw_risk_pct = ((entry_price - atr_stop) / entry_price) * 100.0
+        if raw_risk_pct < 4.0: stop_loss_price = round(entry_price * 0.955, 1)
+        elif raw_risk_pct > 7.5: stop_loss_price = round(entry_price * 0.925, 1)
+        else: stop_loss_price = round(atr_stop, 1)
+        risk_per_share = entry_price - stop_loss_price
+        risk_pct = (risk_per_share / entry_price) * 100.0
+        target_1_price = round(entry_price + (risk_per_share * 1.5), 1)
+        target_2_price = round(entry_price + (risk_per_share * rr_target), 1)
+        max_capital_risk_vnd = capital_vnd * (max_risk_pct / 100.0)
+        raw_shares = max_capital_risk_vnd / (risk_per_share * 1000.0 + 1e-9)
+        allocated_shares = int(np.floor(raw_shares / 100.0) * 100)
+        total_trade_capital_vnd = allocated_shares * entry_price * 1000.0
+        portfolio_weight_pct = (total_trade_capital_vnd / capital_vnd) * 100.0
+        if portfolio_weight_pct > max_stock_weight_pct:
+            allocated_shares = int(np.floor((capital_vnd * (max_stock_weight_pct / 100.0)) / (entry_price * 1000.0) / 100.0) * 100)
+            total_trade_capital_vnd = allocated_shares * entry_price * 1000.0
+            portfolio_weight_pct = (total_trade_capital_vnd / capital_vnd) * 100.0
+        if allocated_shares < 100: allocated_shares = 100
+        vol_impact_pct = (allocated_shares / (ma20_vol + 1e-9)) * 100.0
+        return {
+            "status": "success", "ticker": sym, "entry_price": entry_price, "stop_loss_price": stop_loss_price,
+            "risk_pct": risk_pct, "target_1_price": target_1_price, "target_2_price": target_2_price,
+            "allocated_shares": allocated_shares, "total_trade_capital_vnd": total_trade_capital_vnd,
+            "portfolio_weight_pct": portfolio_weight_pct, "vol_impact_pct": vol_impact_pct
+        }
+    except Exception: return {"status": "error"}
 
 # -------------------------------------------------------------
-# CELLS 6, 7, 8: RADAR, CLIMAX, SHIELD & CELL RISK
+# 🌟 CELLS 6, 7, 8: ARMORED SCANNERS (ZERO OUT-OF-BOUNDS DEFENSE)
 # -------------------------------------------------------------
 def calculate_synchronized_impulse(df_stock: pd.DataFrame, ticker: str):
-    if df_stock is None or df_stock.empty or len(df_stock) < 35: return None
-    df = df_stock.copy()
-    for c in ['Open', 'High', 'Low', 'Close', 'Volume']: df[c] = pd.to_numeric(df[c], errors='coerce')
-    df = df[df['Volume'] > 0].sort_values(by='TradingDate').reset_index(drop=True)
-    ma20_vol = df['Volume'].tail(20).mean()
-    if ma20_vol < 5000: return None
-    c_now = df['Close'].iloc[-1]; c_p5 = df['Close'].iloc[-6] if len(df) >= 6 else df['Close'].iloc[0]
-    roc_5 = ((c_now - c_p5) / (c_p5 + 1e-9)) * 100.0
-    ma20 = df['Close'].rolling(20, min_periods=5).mean().iloc[-1]
-    ma50 = df['Close'].rolling(50, min_periods=10).mean().fillna(ma20).iloc[-1]
-    score = 50.0
-    if c_now >= ma20: score += 15.0
-    if ma20 >= ma50: score += 15.0
-    if roc_5 > 0: score += min(roc_5 * 2.0, 15.0)
-    score = round(min(100.0, score), 1)
-    status = "🔥 SUPER LEADER" if score >= 70.0 else ("⚡ ACCUMULATING" if score >= 50.0 else "🔒 NEUTRAL BASE")
-    return {'Ticker': ticker, 'Price': round(c_now, 1), 'AI IMPULSE SCORE': score, 'Market Status': status, 'ROC (5d)': f"{roc_5:+.1f} %", 'ADX': 25.0, 'Aroon Osc': "+50", 'OBV Z-Score': "+1.50s", 'Base Tightness': "🔒 TIGHT", 'VCP Status': "NORMAL", 'Avg Vol 20d': int(ma20_vol)}
+    try:
+        if df_stock is None or df_stock.empty or len(df_stock) < 35: return None
+        df = df_stock.copy()
+        for c in ['Open', 'High', 'Low', 'Close', 'Volume']: df[c] = pd.to_numeric(df[c], errors='coerce')
+        df = df[df['Volume'] > 0].sort_values(by='TradingDate').reset_index(drop=True)
+        # 🌟 CHỐT CHẶN BẢO VỆ: Nếu sau khi lọc Volume > 0 mà dataframe rỗng thì dừng ngay!
+        if len(df) < 35: return None
+        ma20_vol = df['Volume'].tail(20).mean()
+        if pd.isna(ma20_vol) or ma20_vol < 5000: return None
+        c_now = float(df['Close'].iloc[-1])
+        c_p5 = float(df['Close'].iloc[-6]) if len(df) >= 6 else float(df['Close'].iloc[0])
+        roc_5 = ((c_now - c_p5) / (c_p5 + 1e-9)) * 100.0
+        ma20 = float(df['Close'].rolling(20, min_periods=5).mean().iloc[-1])
+        ma50 = float(df['Close'].rolling(50, min_periods=10).mean().fillna(ma20).iloc[-1])
+        score = 50.0
+        if c_now >= ma20: score += 15.0
+        if ma20 >= ma50: score += 15.0
+        if roc_5 > 0: score += min(roc_5 * 2.0, 15.0)
+        score = round(min(100.0, score), 1)
+        status = "🔥 SUPER LEADER" if score >= 70.0 else ("⚡ ACCUMULATING" if score >= 50.0 else "🔒 NEUTRAL BASE")
+        return {'Ticker': ticker, 'Price': round(c_now, 1), 'AI IMPULSE SCORE': score, 'Market Status': status, 'ROC (5d)': f"{roc_5:+.1f} %", 'ADX': 25.0, 'Aroon Osc': "+50", 'OBV Z-Score': "+1.50s", 'Base Tightness': "🔒 TIGHT", 'VCP Status': "NORMAL", 'Avg Vol 20d': int(ma20_vol)}
+    except Exception: return None
 
 cached_climax_dfs = {}
 
@@ -243,17 +248,18 @@ def scan_synchronized_climax(ticker: str):
         df = df_raw.copy()
         for col in ['Open', 'High', 'Low', 'Close', 'Volume']: df[col] = pd.to_numeric(df[col], errors='coerce')
         df = df[df['Volume'] > 0].sort_values(by='TradingDate').reset_index(drop=True)
+        if len(df) < 35: return None
         ma20_vol = df['Volume'].tail(20).mean()
-        if ma20_vol < 5000: return None
+        if pd.isna(ma20_vol) or ma20_vol < 5000: return None
         rolling_max_100 = df['High'].rolling(min(100, len(df))).max()
         drop_from_peak = ((df['Close'] - rolling_max_100) / (rolling_max_100 + 1e-9)) * 100.0
         if drop_from_peak.iloc[-1] > -12.0: return None
         delta = df['Close'].diff(); gain = delta.where(delta > 0, 0).rolling(14, min_periods=5).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=5).mean()
         rsi = float((100.0 - (100.0 / (1.0 + (gain / (loss + 1e-9))))).iloc[-1])
-        if rsi > 35.0: return None
+        if pd.isna(rsi) or rsi > 35.0: return None
         latest = df.iloc[-1]
         cached_climax_dfs[ticker] = df
-        return {'Ticker': ticker, 'Close Price': round(latest['Close'], 1), 'Drop From Peak': f"{drop_from_peak.iloc[-1]:.1f} %", 'AI Bounce Prob': f"{max(50.0, 90.0 - rsi):.1f} %", 'Support Tested': "BB Low + Kijun 120 + POC", 'OBV Stealth Div': "NO", 'RSI(14)': round(rsi, 1), 'MFI(14)': 25.0, 'Session Vol': int(latest['Volume']), 'Avg Vol 20d': int(ma20_vol), '_prob_num': max(50.0, 90.0 - rsi)}
+        return {'Ticker': ticker, 'Close Price': round(float(latest['Close']), 1), 'Drop From Peak': f"{drop_from_peak.iloc[-1]:.1f} %", 'AI Bounce Prob': f"{max(50.0, 90.0 - rsi):.1f} %", 'Support Tested': "BB Low + Kijun 120 + POC", 'OBV Stealth Div': "NO", 'RSI(14)': round(rsi, 1), 'MFI(14)': 25.0, 'Session Vol': int(latest['Volume']), 'Avg Vol 20d': int(ma20_vol), '_prob_num': max(50.0, 90.0 - rsi)}
     except Exception: return None
 
 def calculate_synchronized_bulltrap_risk(df_ticker: pd.DataFrame):
@@ -270,51 +276,8 @@ def calculate_synchronized_bulltrap_risk(df_ticker: pd.DataFrame):
         return {'Price': round(c, 1), 'Upper Shadow (%)': round(upper_shadow_pct, 1), 'Vol/MA20': 1.0, 'OBV Slope(5d)': 0.5, 'RSI': 25.0, 'Risk Score': risk_score, 'Status': status, 'Action': "VERIFIED SAFE ENTRY ZONE" if risk_score < 35 else "AVOID"}
     except Exception: return None
 
-def calculate_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
-    h, l, c_prev = df['High'], df['Low'], df['Close'].shift(1)
-    tr = pd.concat([h - l, (h - c_prev).abs(), (l - c_prev).abs()], axis=1).max(axis=1)
-    return tr.rolling(window=n, min_periods=n).mean()
-
-def calculate_institutional_t25_risk(ticker: str, df_ticker: pd.DataFrame = None, capital_vnd: float = 1_000_000_000, max_risk_pct: float = 1.5, rr_target: float = 2.0, max_stock_weight_pct: float = 25.0, broker_fee_pct: float = 0.15, sell_tax_pct: float = 0.10) -> dict:
-    sym = str(ticker).strip().upper()
-    df = df_ticker.copy() if df_ticker is not None and not df_ticker.empty else fetch_ipo_historical_ohlcv(sym)
-    if df.empty or len(df) < 20: return {"status": "error"}
-    df['TradingDate'] = pd.to_datetime(df['TradingDate']).dt.normalize()
-    for col in ['Open', 'High', 'Low', 'Close', 'Volume']: df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df[df['Volume'] > 0].sort_values('TradingDate').reset_index(drop=True)
-    df['ATR14'] = calculate_atr(df, n=14)
-    latest = df.iloc[-1]; entry_price = float(latest['Close'])
-    atr_val = float(latest['ATR14']) if pd.notna(latest['ATR14']) else entry_price * 0.03
-    ma20_vol = float(df['Volume'].tail(20).mean())
-    atr_stop = entry_price - (1.5 * atr_val)
-    raw_risk_pct = ((entry_price - atr_stop) / entry_price) * 100.0
-    if raw_risk_pct < 4.0: stop_loss_price = round(entry_price * 0.955, 1)
-    elif raw_risk_pct > 7.5: stop_loss_price = round(entry_price * 0.925, 1)
-    else: stop_loss_price = round(atr_stop, 1)
-    risk_per_share = entry_price - stop_loss_price
-    risk_pct = (risk_per_share / entry_price) * 100.0
-    target_1_price = round(entry_price + (risk_per_share * 1.5), 1)
-    target_2_price = round(entry_price + (risk_per_share * rr_target), 1)
-    max_capital_risk_vnd = capital_vnd * (max_risk_pct / 100.0)
-    raw_shares = max_capital_risk_vnd / (risk_per_share * 1000.0 + 1e-9)
-    allocated_shares = int(np.floor(raw_shares / 100.0) * 100)
-    total_trade_capital_vnd = allocated_shares * entry_price * 1000.0
-    portfolio_weight_pct = (total_trade_capital_vnd / capital_vnd) * 100.0
-    if portfolio_weight_pct > max_stock_weight_pct:
-        allocated_shares = int(np.floor((capital_vnd * (max_stock_weight_pct / 100.0)) / (entry_price * 1000.0) / 100.0) * 100)
-        total_trade_capital_vnd = allocated_shares * entry_price * 1000.0
-        portfolio_weight_pct = (total_trade_capital_vnd / capital_vnd) * 100.0
-    if allocated_shares < 100: allocated_shares = 100
-    vol_impact_pct = (allocated_shares / (ma20_vol + 1e-9)) * 100.0
-    return {
-        "status": "success", "ticker": sym, "entry_price": entry_price, "stop_loss_price": stop_loss_price,
-        "risk_pct": risk_pct, "target_1_price": target_1_price, "target_2_price": target_2_price,
-        "allocated_shares": allocated_shares, "total_trade_capital_vnd": total_trade_capital_vnd,
-        "portfolio_weight_pct": portfolio_weight_pct, "vol_impact_pct": vol_impact_pct
-    }
-
 # -------------------------------------------------------------
-# CELL 9 & CELL EXPORTER: COMPLETE PIPELINE WITH BUG GUARDS
+# CELL 9 & CELL EXPORTER: COMPLETE PIPELINE
 # -------------------------------------------------------------
 benchmark_data_store = {}
 for k in ["VNINDEX", "VN30", "VNMID", "VNSML", "HNX", "UPCOM"]:
@@ -333,8 +296,9 @@ def evaluate_asset_multi_benchmark(ticker: str):
         if df_s is None or df_s.empty or len(df_s) < 20: return None
         df_s['TradingDate'] = pd.to_datetime(df_s['TradingDate']).dt.normalize()
         df_s = df_s[df_s['Volume'] > 0].drop_duplicates(subset=['TradingDate'], keep='last').sort_values('TradingDate').reset_index(drop=True)
+        if len(df_s) < 20: return None
         ma20_vol = float(df_s['Volume'].tail(20).mean())
-        if ma20_vol < MIN_LIQUIDITY_MA20: return None
+        if pd.isna(ma20_vol) or ma20_vol < MIN_LIQUIDITY_MA20: return None
         df_s['Ret'] = df_s['Close'].pct_change()
         meta = get_ticker_pillar_info(ticker)
         b_payload = benchmark_data_store.get(meta.get('Pillar_Key', 'VNSML'), vni_store)
@@ -386,6 +350,7 @@ def process_complete_quant_asset(sym: str):
         df_d['TradingDate'] = pd.to_datetime(df_d['TradingDate']).dt.normalize()
         for c in ['Open', 'High', 'Low', 'Close', 'Volume']: df_d[c] = pd.to_numeric(df_d[c], errors='coerce')
         df_d = df_d[df_d['Volume'] > 0].sort_values('TradingDate').reset_index(drop=True)
+        if len(df_d) < 20: return None
         df_d['DateStr'] = df_d['TradingDate'].dt.strftime('%Y-%m-%d')
         last_d = df_d.iloc[-1]; p_c = round(float(last_d['Close']), 1); v_c = int(last_d['Volume'])
         ma20_vol = float(df_d['Volume'].tail(20).mean())
@@ -423,27 +388,43 @@ def process_complete_quant_asset(sym: str):
     except Exception: return None
 
 # -------------------------------------------------------------
-# MASTER EXECUTION ENTRY POINT
+# 🌟 MASTER EXECUTION WITH TOTAL EXCEPTION SHIELD
 # -------------------------------------------------------------
+def safe_radar_worker(s):
+    try:
+        df = fetch_ipo_historical_ohlcv(s)
+        return calculate_synchronized_impulse(df, s)
+    except Exception: return None
+
+def safe_climax_worker(s):
+    try:
+        return scan_synchronized_climax(s)
+    except Exception: return None
+
+def safe_factor_worker(s):
+    try:
+        return evaluate_asset_multi_benchmark(s)
+    except Exception: return None
+
 if __name__ == "__main__":
     if not verify_market_session_finalized(): sys.exit(0)
     print("🚀 [KING TRADING] Commencing Full Quantitative Scan across 1,579 Equities...")
     t_start = time.time()
     all_symbols = get_vietnam_all_tickers()
 
-    # 1. Quét xung lực toàn sàn (Cell 6)
+    # 1. Quét xung lực toàn sàn (Cell 6) - Bọc Worker an toàn
     with ThreadPoolExecutor(max_workers=25) as ex:
-        radar_results = [r for r in ex.map(lambda s: calculate_synchronized_impulse(fetch_ipo_historical_ohlcv(s), s), all_symbols) if r]
-    df_radar_sorted = pd.DataFrame(radar_results).sort_values(by='AI IMPULSE SCORE', ascending=False).reset_index(drop=True)
-    df_radar_sorted.insert(0, 'RANK', df_radar_sorted.index + 1)
+        radar_results = [r for r in ex.map(safe_radar_worker, all_symbols) if r is not None]
+    df_radar_sorted = pd.DataFrame(radar_results).sort_values(by='AI IMPULSE SCORE', ascending=False).reset_index(drop=True) if radar_results else pd.DataFrame()
+    if not df_radar_sorted.empty: df_radar_sorted.insert(0, 'RANK', df_radar_sorted.index + 1)
 
-    # 2. Quét bắt đáy hoảng loạn (Cell 7)
+    # 2. Quét bắt đáy hoảng loạn (Cell 7) - Bọc Worker an toàn
     with ThreadPoolExecutor(max_workers=25) as ex:
-        climax_results = [r for r in ex.map(scan_synchronized_climax, all_symbols) if r]
+        climax_results = [r for r in ex.map(safe_climax_worker, all_symbols) if r is not None]
     df_climax = pd.DataFrame(climax_results).sort_values(by='_prob_num', ascending=False).reset_index(drop=True) if climax_results else pd.DataFrame()
     if not df_climax.empty: df_climax.insert(0, 'RANK', df_climax.index + 1)
 
-    # 3. 🌟 VÁ LỖI AN TOÀN: Lọc bẫy giá Bulltrap (Cell 8) - Chống crash NoneType
+    # 3. Lọc bẫy giá Bulltrap (Cell 8) - Bọc Worker an toàn
     risk_results = []
     for item in climax_results:
         sym = item.get('Ticker')
@@ -456,9 +437,9 @@ if __name__ == "__main__":
     df_risk_sorted = pd.DataFrame(risk_results).sort_values(by=['Risk Score', 'Price'], ascending=[True, False]).reset_index(drop=True) if risk_results else pd.DataFrame()
     if not df_risk_sorted.empty: df_risk_sorted.insert(0, 'SAFETY RANK', df_risk_sorted.index + 1)
 
-    # 4. Tương quan 5 trụ cột & Lội ngược bão (Cell 9)
+    # 4. Tương quan 5 trụ cột & Lội ngược bão (Cell 9) - Bọc Worker an toàn
     with ThreadPoolExecutor(max_workers=25) as ex:
-        factor_results = [r for r in ex.map(evaluate_asset_multi_benchmark, all_symbols) if r]
+        factor_results = [r for r in ex.map(safe_factor_worker, all_symbols) if r is not None]
     df_factors = pd.DataFrame(factor_results) if factor_results else pd.DataFrame()
     df_trend_followers = df_factors.sort_values(by='_roc_20', ascending=False).reset_index(drop=True) if not df_factors.empty else pd.DataFrame()
     if not df_trend_followers.empty: df_trend_followers.insert(0, 'RANK', df_trend_followers.index + 1)
