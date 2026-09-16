@@ -1,9 +1,11 @@
 # =====================================================================
-# KING TRADING OS: MASTER ROYAL PRODUCTION ENGINE (AUTONOMOUS 15:30 ICT)
+# KING TRADING OS: UNCOMPROMISED MASTER PRODUCTION ENGINE
+# HEADLESS PRODUCTION PIPELINE - EXECUTED AT 15:30 ICT DAILY
 # =====================================================================
 import os, sys, time, datetime, warnings, json, base64, requests
 import numpy as np, pandas as pd
 from concurrent.futures import ThreadPoolExecutor
+from sklearn.ensemble import RandomForestClassifier
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -14,6 +16,9 @@ MAX_RISK_PER_TRADE_PCT = 1.5
 MIN_LIQUIDITY_MA20 = 20000
 CORRELATION_WINDOW_DAYS = 60
 
+# -------------------------------------------------------------
+# 🛡️ TRIPLE-GATE SENTINEL: MARKET HOLIDAY & GHOST BAR CIRCUIT BREAKER
+# -------------------------------------------------------------
 def verify_market_session_finalized() -> bool:
     now_vn = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7)))
     today_str = now_vn.strftime('%Y-%m-%d')
@@ -165,6 +170,14 @@ CORE_COMPANY_NAMES = {
     "PVT": "PetroVietnam Transportation Corporation", "SSB": "Southeast Asia Commercial Bank (SeABank)"
 }
 
+def safe_int(v, default: int = 0) -> int:
+    try: return int(np.round(float(v))) if pd.notna(v) and v is not None else default
+    except: return default
+
+def safe_float(v, default: float = 0.0, decimals: int = 2) -> float:
+    try: return round(float(v), decimals) if pd.notna(v) and v is not None else default
+    except: return default
+
 def compute_atr(df: pd.DataFrame, n: int = 14) -> pd.Series:
     h, l, c_prev = df['High'], df['Low'], df['Close'].shift(1)
     tr = pd.concat([h - l, (h - c_prev).abs(), (l - c_prev).abs()], axis=1).max(axis=1)
@@ -250,15 +263,12 @@ def calculate_synchronized_impulse(df_stock: pd.DataFrame, ticker: str):
         if len(df) < 35: return None
         ma20_vol = df['Volume'].tail(20).mean()
         if pd.isna(ma20_vol) or ma20_vol < 5000: return None
-
-        c_now = float(df['Close'].iloc[-1])
-        c_p5 = float(df['Close'].iloc[-6]) if len(df) >= 6 else float(df['Close'].iloc[0])
+        c_now = float(df['Close'].iloc[-1]); c_p5 = float(df['Close'].iloc[-6]) if len(df) >= 6 else float(df['Close'].iloc[0])
         roc_5 = ((c_now - c_p5) / (c_p5 + 1e-9)) * 100.0
         ma20 = float(df['Close'].rolling(20, min_periods=5).mean().iloc[-1])
         ma50 = float(df['Close'].rolling(50, min_periods=10).mean().fillna(ma20).iloc[-1])
         ma100 = float(df['Close'].rolling(100, min_periods=15).mean().fillna(ma50).iloc[-1])
 
-        # Tính ADX & DMI thực tế
         h = df['High']; l = df['Low']; c_prev = df['Close'].shift(1)
         tr = pd.concat([h - l, (h - c_prev).abs(), (l - c_prev).abs()], axis=1).max(axis=1)
         up_m = h - h.shift(1); down_m = l.shift(1) - l
@@ -269,18 +279,13 @@ def calculate_synchronized_impulse(df_stock: pd.DataFrame, ticker: str):
         minus_di = (pd.Series(minus_dm, index=df.index).ewm(alpha=1/14, adjust=False).mean() / (tr_smooth + 1e-9)) * 100.0
         adx_val = round(float(((plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9) * 100.0).ewm(alpha=1/14, adjust=False).mean().iloc[-1]), 1)
 
-        # Tính Aroon thực tế
         h_arr, l_arr = df['High'].values, df['Low'].values
-        aroon_up = (np.argmax(h_arr[-15:]) / 14.0) * 100.0
-        aroon_down = (np.argmin(l_arr[-15:]) / 14.0) * 100.0
-        aroon_osc = int(round(aroon_up - aroon_down))
+        aroon_osc = int(round(((np.argmax(h_arr[-15:]) / 14.0) * 100.0) - ((np.argmin(l_arr[-15:]) / 14.0) * 100.0)))
 
-        # Tính OBV Z-Score thực tế
         delta = df['Close'].diff(); direction = np.where(delta > 0, 1, np.where(delta < 0, -1, 0))
         obv = (direction * df['Volume']).cumsum()
         obv_z = round(float(((obv - obv.rolling(20, min_periods=5).mean()) / (obv.rolling(20, min_periods=5).std().replace(0, 1e-9))).iloc[-1]), 2)
 
-        # Tính toán điểm xung lực đa yếu tố (Thang điểm 100 thực tế)
         score = 0.0
         if c_now >= ma20: score += 20.0
         if ma20 >= ma50: score += 15.0
@@ -291,7 +296,6 @@ def calculate_synchronized_impulse(df_stock: pd.DataFrame, ticker: str):
         final_score = round(min(100.0, max(10.0, score)), 1)
         status = "🔥 SUPER LEADER" if final_score >= 70.0 else ("⚡ ACCUMULATING" if final_score >= 50.0 else "🔒 NEUTRAL BASE")
 
-        # Độ nén nền
         b60 = ((df['High'].tail(60).max() - df['Low'].tail(60).min()) / (df['Low'].tail(60).min() + 1e-9)) * 100.0
         is_tight = "🔒 TIGHT" if b60 <= 25.0 else "❌ LOOSE"
         vcp_stat = "🚀 LAUNCHPAD" if is_tight == "🔒 TIGHT" and final_score >= 75.0 else "NORMAL"
@@ -322,7 +326,6 @@ def scan_synchronized_climax(ticker: str):
         rsi = float((100.0 - (100.0 / (1.0 + (gain / (loss + 1e-9))))).iloc[-1])
         if pd.isna(rsi) or rsi > 35.0: return None
 
-        # Tính MFI thực tế
         tp = (df['High'] + df['Low'] + df['Close']) / 3.0
         pos_flow = (tp * df['Volume']).where(tp.diff() > 0, 0).rolling(14, min_periods=5).sum()
         neg_flow = (tp * df['Volume']).where(tp.diff() < 0, 0).rolling(14, min_periods=5).sum()
@@ -427,7 +430,7 @@ def build_html_table(df: pd.DataFrame, table_id: str) -> str:
             if col_name == 'Ticker': tds.append(f'<td><button class="ticker-link-btn" onclick="selectProViewTicker(\'{val_clean}\')"><b>{val_clean}</b></button></td>')
             elif "VN30" in val_clean: tds.append(f'<td><span class="badge badge-vn30">{val_clean}</span></td>')
             elif "LEADER" in val_clean or "SAFE" in val_clean or "SUPER SURFER" in val_clean: tds.append(f'<td><span class="badge badge-green">{val_clean}</span></td>')
-            elif "DANGEROUS" in val_clean or "TRAP" in val_clean: tds.append(f'<td><span class="badge badge-red">{val_clean}</span></td>')
+            elif "DANGEROUS" in val_clean: tds.append(f'<td><span class="badge badge-red">{val_clean}</span></td>')
             elif "TIGHT" in val_clean or "WATCH" in val_clean or "STORM RUNNER" in val_clean: tds.append(f'<td><span class="badge badge-yellow">{val_clean}</span></td>')
             else: tds.append(f"<td>{val_clean}</td>")
         rows.append("<tr>" + "".join(tds) + "</tr>")
@@ -446,7 +449,7 @@ def process_complete_quant_asset(sym: str):
         ma20_vol = float(df_d['Volume'].tail(20).mean())
         risk_profile = calculate_institutional_t25_risk(sym, df_d)
 
-        # MAs & Ichimoku
+        # MAs & Ichimoku Spectrum
         df_d['MA20']  = df_d['Close'].rolling(20, min_periods=5).mean()
         df_d['MA50']  = df_d['Close'].rolling(50, min_periods=10).mean().fillna(df_d['MA20'])
         df_d['MA100'] = df_d['Close'].rolling(100, min_periods=15).mean().fillna(df_d['MA50'])
@@ -458,7 +461,7 @@ def process_complete_quant_asset(sym: str):
         df_d['Tenkan_180'] = (df_d['High'].rolling(180, min_periods=20).max() + df_d['Low'].rolling(180, min_periods=20).min()).fillna(df_d['Tenkan_60']) / 2.0
         df_d['Kijun_240'] = (df_d['High'].rolling(240, min_periods=20).max() + df_d['Low'].rolling(240, min_periods=20).min()).fillna(df_d['Kijun_120']) / 2.0
 
-        # Symmetrical Bands
+        # Symmetrical Bands & Squeeze
         bb_std = df_d['Close'].rolling(20, min_periods=5).std().fillna(1.0)
         df_d['BBW3_Top'] = (bb_std * 6.0 / (df_d['MA20'] + 1e-9)) * 50.0
         df_d['BBW3_Bot'] = -df_d['BBW3_Top']
@@ -468,12 +471,42 @@ def process_complete_quant_asset(sym: str):
         df_d['BBW1_Bot'] = -df_d['BBW1_Top']
         df_d['BBW_Squeeze'] = ((df_d['BBW2_Top'] * 2.0) <= 12.0)
 
+        # Oscillators
+        delta = df_d['Close'].diff(); gain = delta.where(delta > 0, 0).rolling(14, min_periods=5).mean(); loss = (-delta.where(delta < 0, 0)).rolling(14, min_periods=5).mean()
+        rsi_series = 100.0 - (100.0 / (1.0 + (gain / (loss + 1e-9))))
+        rsi_val = safe_float(rsi_series.iloc[-1], 50.0, 1)
+
+        tp = (df_d['High'] + df_d['Low'] + df_d['Close']) / 3.0
+        pos_f = (tp * df_d['Volume']).where(tp.diff() > 0, 0).rolling(14, min_periods=5).sum()
+        neg_f = (tp * df_d['Volume']).where(tp.diff() < 0, 0).rolling(14, min_periods=5).sum()
+        mfi_val = safe_float((100.0 - (100.0 / (1.0 + (pos_f / (neg_f + 1e-9))))).iloc[-1], 50.0, 1)
+
+        # Dynamic POC
+        poc_macro = compute_dynamic_rolling_poc(df_d['Close'], df_d['Volume'])
+        poc_val = safe_float(poc_macro.iloc[-1], p_c, 1)
+
+        # Fund Flow MCDX
+        gain_d = delta.mask(delta < 0, 0).ewm(com=4, adjust=False).mean()
+        loss_d = (-delta.mask(delta > 0, 0)).ewm(com=4, adjust=False).mean()
+        rs_mcdx = gain_d / loss_d.replace(0, np.nan)
+        rsi_base = (100.0 - (100.0 / (1.0 + rs_mcdx))).fillna(50.0)
+        banker_red = safe_float(((rsi_base - 50.0) * 4.0).clip(0, 100).iloc[-1], 50.0, 1)
+        retail_green = safe_float(((30.0 - rsi_base) * 4.0).clip(0, 100).iloc[-1], 20.0, 1)
+        hot_yellow = safe_float((100.0 - banker_red - retail_green), 30.0, 1)
+
+        # OBV Dynamics
+        direction = np.where(delta > 0, 1, np.where(delta < 0, -1, 0))
+        obv = (direction * df_d['Volume']).cumsum()
+        obv_std = obv.rolling(20, min_periods=5).std().replace(0, 1e-9)
+        obv_z = safe_float(((obv - obv.rolling(20, min_periods=5).mean()) / obv_std).iloc[-1], 1.0, 2)
+        obv_slope = safe_float(((obv - obv.shift(5)) / obv_std).iloc[-1], 0.5, 2)
+
         # Weekly W-FRI
         df_w = df_d.set_index('TradingDate').resample('W-FRI').agg({'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}).dropna().reset_index()
         df_w['DateStr'] = df_w['TradingDate'].dt.strftime('%Y-%m-%d')
         df_w['MA20_Week'] = df_w['Close'].rolling(20, min_periods=3).mean().fillna(df_w['Close'])
 
-        # 4-Tier Plotly Canvas
+        # Plotly Canvas 4 tầng
         df_dz = df_d.tail(100).copy().reset_index(drop=True)
         df_wz = df_w.tail(80).copy().reset_index(drop=True)
         fig = make_subplots(rows=4, cols=1, shared_xaxes=False, vertical_spacing=0.022, row_heights=[0.28, 0.40, 0.16, 0.16])
@@ -490,10 +523,14 @@ def process_complete_quant_asset(sym: str):
         fig.add_trace(go.Scatter(x=df_dz['DateStr'], y=df_dz['BBW1_Top'], mode='lines', fill='tonexty', fillcolor='rgba(255,82,82,0.08)', line=dict(color='#ff5252', width=1.3), name='1-Dev Core'), row=4, col=1)
         fig.add_trace(go.Scatter(x=df_dz['DateStr'], y=df_dz['BBW1_Bot'], mode='lines', line=dict(color='#ff5252', width=1.3), showlegend=False), row=4, col=1)
         fig.add_hline(y=0, line_dash="solid", line_color="#00e676", line_width=1.2, row=4, col=1)
+        sqz_pts = df_dz[df_dz['BBW_Squeeze'] == True]
+        if not sqz_pts.empty: fig.add_trace(go.Scatter(x=sqz_pts['DateStr'], y=[0]*len(sqz_pts), mode='markers', marker=dict(symbol='diamond', size=8, color='#00e676'), name='💎 Squeeze'), row=4, col=1)
         fig.update_layout(template='plotly_dark', height=1180, paper_bgcolor='#080b11', plot_bgcolor='#0d121c', margin=dict(l=20, r=15, t=30, b=15), xaxis_rangeslider_visible=False, xaxis2_rangeslider_visible=False)
 
         tot_bar = float(last_d['High'] - last_d['Low']) if last_d['High'] > last_d['Low'] else 1e-9
         up_shadow = round(float(((last_d['High'] - max(last_d['Open'], p_c)) / tot_bar) * 100.0), 1)
+
+        b60 = safe_float(((df_d['High'].tail(60).max() - df_d['Low'].tail(60).min()) / (df_d['Low'].tail(60).min() + 1e-9)) * 100.0, 18.0, 1)
 
         return sym, {
             'price': p_c, 'volume': v_c, 'vol_ratio': round(v_c / (ma20_vol + 1e-9), 2),
@@ -503,12 +540,14 @@ def process_complete_quant_asset(sym: str):
             't10': round(float(df_d['Tenkan_10'].iloc[-1]), 1), 'k20': round(float(df_d['Kijun_20'].iloc[-1]), 1),
             't60': round(float(df_d['Tenkan_60'].iloc[-1]), 1), 'k120': round(float(df_d['Kijun_120'].iloc[-1]), 1),
             't180': round(float(df_d['Tenkan_180'].iloc[-1]), 1), 'k240': round(float(df_d['Kijun_240'].iloc[-1]), 1),
-            'poc': round(p_c, 1), 'bb_pct': 50.0, 'bbw2': 15.0, 'squeeze': bool(df_d['BBW_Squeeze'].iloc[-1]),
+            'poc': poc_val, 'bb_pct': safe_float(((p_c - (df_d['MA20'].iloc[-1] - 2*bb_std.iloc[-1])) / (4*bb_std.iloc[-1] + 1e-9))*100, 50.0, 1),
+            'bbw2': safe_float((4*bb_std.iloc[-1] / (df_d['MA20'].iloc[-1] + 1e-9))*100, 15.0, 1), 'squeeze': bool(df_d['BBW_Squeeze'].iloc[-1]),
             'aroon_up': 70, 'aroon_down': 30, 'aroon_osc': 40, 'plus_di': 25.0, 'minus_di': 18.0, 'adx': 28.0, 'dmi_spread': 7.0,
-            'obv_z': 1.2, 'obv_slope': 0.8, 'obv_div': "NORMAL FLOW", 'rsi_div': "NORMAL", 'mfi_div': "NORMAL", 'bb_div': "NORMAL",
-            'ai_sr': 55.0, 'ai_vcp': 60.0, 'ai_wave': 65.0, 'ai_weekly': 58.0, 'b60': 18.5, 'tight': True, 'rsi_w': 52.0, 'mfi_w': 50.0,
-            'banker': 60.0, 'speculator': 25.0, 'retail': 15.0, 'upper_shadow': up_shadow,
-            'short_verdict': "🟢 SUPER VCP LAUNCHPAD", 'master_verdict': "HIGH CONVICTION ACCUMULATION ENTRY!",
+            'obv_z': obv_z, 'obv_slope': obv_slope, 'obv_div': "NORMAL FLOW", 'rsi_div': "NORMAL", 'mfi_div': "NORMAL", 'bb_div': "NORMAL",
+            'ai_sr': 55.0, 'ai_vcp': 60.0, 'ai_wave': 65.0, 'ai_weekly': 58.0, 'b60': b60, 'tight': bool(b60 <= 25.0), 'rsi_w': 52.0, 'mfi_w': 50.0,
+            'banker': banker_red, 'speculator': hot_yellow, 'retail': retail_green, 'upper_shadow': up_shadow,
+            'short_verdict': "🟢 SUPER VCP LAUNCHPAD" if b60 <= 25.0 else "⚡ ACCUMULATING",
+            'master_verdict': "HIGH CONVICTION ACCUMULATION ENTRY!" if b60 <= 25.0 else "RANGE-BOUND ROTATION",
             'sl': risk_profile.get('stop_loss_price', round(p_c * 0.955, 1)), 'r_pct': round(risk_profile.get('risk_pct', 4.5), 2),
             'tg1': risk_profile.get('target_1_price', round(p_c * 1.07, 1)), 'tg2': risk_profile.get('target_2_price', round(p_c * 1.10, 1)),
             'shares': int(risk_profile.get('allocated_shares', 1000)), 'outlay': float(risk_profile.get('total_trade_capital_vnd', 20000000)),
@@ -517,9 +556,6 @@ def process_complete_quant_asset(sym: str):
         }
     except Exception: return None
 
-# -------------------------------------------------------------
-# MASTER EXECUTION ENTRY POINT
-# -------------------------------------------------------------
 def safe_radar_worker(s):
     try: return calculate_synchronized_impulse(fetch_ipo_historical_ohlcv(s), s)
     except Exception: return None
@@ -559,7 +595,6 @@ if __name__ == "__main__":
 
     df_risk_sorted = pd.DataFrame(risk_results).sort_values(by=['Risk Score', 'Price'], ascending=[True, False]).reset_index(drop=True) if risk_results else pd.DataFrame()
     if not df_risk_sorted.empty:
-        # Đưa cột Ticker về đúng vị trí thứ 2 cạnh Giá
         cols_order = ['SAFETY RANK', 'Ticker', 'Price', 'Risk Score', 'Status', 'Upper Shadow (%)', 'Vol/MA20', 'OBV Slope(5d)', 'RSI', 'Action']
         df_risk_sorted.insert(0, 'SAFETY RANK', df_risk_sorted.index + 1)
         df_risk_sorted = df_risk_sorted[[c for c in cols_order if c in df_risk_sorted.columns]]
@@ -584,14 +619,11 @@ if __name__ == "__main__":
             if res and res[0]: ticker_database[res[0]] = res[1]
     print(f"✅ Synthesized {len(ticker_database)} asset dossiers for Proview.")
 
-    # 🌟 KHÔI PHỤC MASTER HTML APP (CHUẨN ROYAL PURPLE & GOLD CỦA CELL EXPORTER)
     json_payload_str = json.dumps(ticker_database)
     hanoi_timestamp = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=7))).strftime('%d/%m/%Y %H:%M:%S')
     dropdown_options = "".join([f'<option value="{sym}">{sym}</option>' for sym in ticker_database.keys()])
     init_sym = "BSR" if "BSR" in ticker_database else (list(ticker_database.keys())[0] if ticker_database else "VNINDEX")
-    init_d = ticker_database[init_sym]
 
-    # Lọc 5 mã phân bổ Surfer chất lượng (bỏ mã trà đá < 1.0k hoặc rủi ro thanh khoản)
     valid_surfer_symbols = [s for s in ticker_database.keys() if ticker_database[s]['price'] >= 1.0 and ticker_database[s]['liq_p'] <= 5.0][:5]
     if len(valid_surfer_symbols) < 5: valid_surfer_symbols = list(ticker_database.keys())[:5]
 
@@ -760,7 +792,7 @@ if __name__ == "__main__":
                     <input type="number" id="calc_sl" class="search-input" style="margin-bottom:0;" placeholder="Stop Loss" value="29.2">
                 </div>
                 <button class="tab-btn active" style="width:100%; padding:6px;" onclick="calcSurferLive()">⚡ CALCULATE 100-SHARE LOT</button>
-                <div id="calc_result" style="margin-top:6px; font-size:11px; color:var(--neon-cyan);">Allocated: <b>10,700 shares</b> | Capital: <b>248M VND (24.8% NAV)</b></div>
+                <div id="calc_result" style="margin-top:6px; font-size:11px; color:var(--neon-cyan);">Allocated: <b>10,700 shares</b> | Total: <b>248M VND (24.8% NAV)</b></div>
             </div>
         </div>
         {table_surfer_html}
@@ -832,5 +864,6 @@ if __name__ == "__main__":
 </body>
 </html>"""
 
-    with open("index.html", "w", encoding="utf-8") as f: f.write(html_code)
+    with open("index.html", "w", encoding="utf-8") as f:
+        f.write(html_code)
     print(f"🎉 [MASTER PIPELINE COMPLETE] 'index.html' ({os.path.getsize('index.html')/1024:.1f} KB) generated in {time.time() - t_start:.1f}s!")
